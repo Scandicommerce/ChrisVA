@@ -3,10 +3,12 @@ import { Email, EmailSummary, EmailCategory, Priority, VAConfig } from '../core/
 export class EmailTriageModule {
   private priorityKeywords: string[];
   private merchantKeywords: string[];
+  private userEmail: string;
 
   constructor(private config: VAConfig) {
     this.priorityKeywords = config.preferences.priorityKeywords.map((k) => k.toLowerCase());
     this.merchantKeywords = config.preferences.merchantKeywords.map((k) => k.toLowerCase());
+    this.userEmail = config.outlook.userEmail;
   }
 
   triageEmails(emails: Email[]): EmailSummary[] {
@@ -22,27 +24,49 @@ export class EmailTriageModule {
     const searchText = `${email.subject} ${email.body} ${email.snippet}`.toLowerCase();
     const fromText = email.from.toLowerCase();
 
-    const isMerchantRequest = this.merchantKeywords.some((kw) => searchText.includes(kw));
-    const priority = this.assessPriority(searchText, fromText, isMerchantRequest);
-    const category = this.categorize(email, isMerchantRequest);
-    const actionRequired = this.needsAction(priority, category, email);
-    const suggestedAction = this.suggestAction(priority, category, isMerchantRequest, email);
+    // Only flag as merchant request if sender is external (not internal/automated)
+    const isInternal = this.isInternalSender(fromText);
+    const isAutomated = this.isAutomatedSender(fromText);
+    const isMerchantRequest = !isInternal && !isAutomated &&
+      this.merchantKeywords.some((kw) => searchText.includes(kw));
 
-    return {
-      email,
-      priority,
-      category,
-      actionRequired,
-      suggestedAction,
-      isMerchantRequest,
-    };
+    const priority = this.assessPriority(searchText, fromText, email, isMerchantRequest);
+    const category = this.categorize(email, isMerchantRequest);
+    const actionRequired = this.needsAction(priority, category);
+    const suggestedAction = this.suggestAction(priority, category, isMerchantRequest);
+
+    return { email, priority, category, actionRequired, suggestedAction, isMerchantRequest };
   }
 
-  private assessPriority(text: string, from: string, isMerchant: boolean): Priority {
+  private isInternalSender(from: string): boolean {
+    const senderDomain = this.extractDomain(from);
+    const myDomain = this.extractDomain(this.userEmail);
+    return !!(senderDomain && myDomain && senderDomain === myDomain);
+  }
+
+  private isAutomatedSender(from: string): boolean {
+    return (
+      from.includes('noreply') || from.includes('no-reply') ||
+      from.includes('notifications@') || from.includes('automated') ||
+      from.includes('jira@') || from.includes('github.com') ||
+      from.includes('atlassian.net') || from.includes('datadoghq.com') ||
+      from.includes('alerts@') || from.includes('newsletter@')
+    );
+  }
+
+  private assessPriority(text: string, from: string, email: Email, isMerchant: boolean): Priority {
+    // Outlook importance flag overrides
+    if (email.importance === 'high') {
+      const hasCritical = this.priorityKeywords
+        .filter((k) => ['critical', 'p0', 'production', 'blocker'].includes(k))
+        .some((kw) => text.includes(kw));
+      if (hasCritical) return 'critical';
+      return 'high';
+    }
+
     const hasCriticalKeyword = this.priorityKeywords
       .filter((k) => ['critical', 'p0', 'production', 'blocker'].includes(k))
       .some((kw) => text.includes(kw));
-
     if (hasCriticalKeyword) return 'critical';
 
     const hasUrgentKeyword = this.priorityKeywords.some((kw) => text.includes(kw));
@@ -50,7 +74,6 @@ export class EmailTriageModule {
 
     if (isMerchant) return 'high';
 
-    // Noreply / automated senders are low priority
     if (from.includes('noreply') || from.includes('no-reply') || from.includes('notifications@')) {
       return 'low';
     }
@@ -69,19 +92,17 @@ export class EmailTriageModule {
     }
 
     if (
-      from.includes('noreply') ||
-      from.includes('no-reply') ||
-      from.includes('notifications@') ||
-      from.includes('automated') ||
-      from.includes('jira@') ||
-      from.includes('github.com')
+      from.includes('noreply') || from.includes('no-reply') ||
+      from.includes('notifications@') || from.includes('automated') ||
+      from.includes('jira@') || from.includes('github.com') ||
+      from.includes('atlassian.net') || from.includes('datadoghq.com') ||
+      from.includes('alerts@')
     ) {
       return 'automated';
     }
 
-    // Check if from same domain (internal)
     const senderDomain = this.extractDomain(from);
-    const myDomain = this.extractDomain(this.config.gmail.user);
+    const myDomain = this.extractDomain(this.userEmail);
     if (senderDomain && myDomain && senderDomain === myDomain) {
       return 'internal';
     }
@@ -89,24 +110,23 @@ export class EmailTriageModule {
     return 'external';
   }
 
-  private needsAction(priority: Priority, category: EmailCategory, _email: Email): boolean {
-    if (category === 'newsletter' || category === 'automated') return false;
+  private needsAction(priority: Priority, category: EmailCategory): boolean {
+    if (category === 'newsletter') return false;
+    if (category === 'automated') return priority === 'critical';
     if (priority === 'critical' || priority === 'high') return true;
     if (category === 'merchant-request') return true;
     return priority === 'medium';
   }
 
-  private suggestAction(
-    priority: Priority,
-    category: EmailCategory,
-    isMerchant: boolean,
-    _email: Email
-  ): string {
+  private suggestAction(priority: Priority, category: EmailCategory, isMerchant: boolean): string {
     if (isMerchant && priority === 'critical') {
       return 'URGENT: Create Jira ticket and assign to available team member immediately';
     }
-    if (isMerchant) {
+    if (isMerchant && priority === 'high') {
       return 'Create Jira ticket from merchant request and assign to team';
+    }
+    if (isMerchant) {
+      return 'Review merchant request and create ticket during triage block';
     }
     if (priority === 'critical') {
       return 'Respond immediately — this is flagged as critical';
@@ -117,7 +137,10 @@ export class EmailTriageModule {
     if (category === 'internal') {
       return 'Review and respond during next email block';
     }
-    if (category === 'newsletter' || category === 'automated') {
+    if (category === 'automated') {
+      return 'Check if action needed, otherwise archive';
+    }
+    if (category === 'newsletter') {
       return 'Archive or skim during low-priority block';
     }
     return 'Review during scheduled email time';
@@ -137,11 +160,7 @@ export class EmailTriageModule {
   } {
     const byPriority: Record<Priority, number> = { critical: 0, high: 0, medium: 0, low: 0 };
     const byCategory: Record<EmailCategory, number> = {
-      'merchant-request': 0,
-      internal: 0,
-      external: 0,
-      automated: 0,
-      newsletter: 0,
+      'merchant-request': 0, internal: 0, external: 0, automated: 0, newsletter: 0,
     };
     let actionRequired = 0;
     let merchantRequests = 0;
@@ -153,12 +172,6 @@ export class EmailTriageModule {
       if (s.isMerchantRequest) merchantRequests++;
     }
 
-    return {
-      total: summaries.length,
-      byPriority,
-      byCategory,
-      actionRequired,
-      merchantRequests,
-    };
+    return { total: summaries.length, byPriority, byCategory, actionRequired, merchantRequests };
   }
 }

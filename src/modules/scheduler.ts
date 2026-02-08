@@ -1,5 +1,8 @@
 import dayjs from 'dayjs';
-import { DailyBriefing, EmailSummary, JiraIssue, TriageResult, TimeBlock, VAConfig } from '../core/types';
+import {
+  DailyBriefing, EmailSummary, JiraIssue, TriageResult,
+  CalendarEvent, TimeBlock, VAConfig,
+} from '../core/types';
 
 export class SchedulerModule {
   private startHour: number;
@@ -13,11 +16,12 @@ export class SchedulerModule {
   generateBriefing(
     emailSummaries: EmailSummary[],
     openIssues: JiraIssue[],
-    triageResults: TriageResult[]
+    triageResults: TriageResult[],
+    calendarEvents: CalendarEvent[] = []
   ): DailyBriefing {
     const priorityEmails = emailSummaries.filter((e) => e.actionRequired);
     const merchantRequests = triageResults.filter((t) => t.isMerchantRequest);
-    const schedule = this.buildSchedule(priorityEmails, openIssues, merchantRequests);
+    const schedule = this.buildSchedule(priorityEmails, openIssues, merchantRequests, calendarEvents);
 
     return {
       date: new Date(),
@@ -25,6 +29,7 @@ export class SchedulerModule {
       priorityEmails,
       openJiraIssues: openIssues,
       merchantRequests,
+      todaysMeetings: calendarEvents,
       suggestedSchedule: schedule,
     };
   }
@@ -32,130 +37,186 @@ export class SchedulerModule {
   private buildSchedule(
     priorityEmails: EmailSummary[],
     openIssues: JiraIssue[],
-    merchantRequests: TriageResult[]
+    merchantRequests: TriageResult[],
+    meetings: CalendarEvent[]
   ): TimeBlock[] {
     const blocks: TimeBlock[] = [];
-    let currentHour = this.startHour;
 
-    // Block 1: Morning briefing & critical items
+    // Add meetings as fixed blocks first
+    const meetingBlocks: TimeBlock[] = meetings
+      .filter((m) => !m.isAllDay)
+      .map((m) => ({
+        start: dayjs(m.start).format('HH:mm'),
+        end: dayjs(m.end).format('HH:mm'),
+        activity: m.subject + (m.isOnline ? ' (online)' : m.location ? ` @ ${m.location}` : ''),
+        category: 'meeting' as const,
+        relatedItems: [m.id],
+      }));
+
+    // Build work blocks around meetings
+    let currentMinute = this.startHour * 60;
+    const endMinute = this.endHour * 60;
+
+    // Sort meetings by start time
+    const sortedMeetings = [...meetingBlocks].sort((a, b) => this.toMinutes(a.start) - this.toMinutes(b.start));
+
+    // Morning briefing
     blocks.push({
-      start: this.fmt(currentHour, 0),
-      end: this.fmt(currentHour, 30),
-      activity: 'Morning briefing — review priorities and plan the day',
+      start: this.fmtMin(currentMinute),
+      end: this.fmtMin(currentMinute + 15),
+      activity: 'Morning briefing — review ChrisVA dashboard, plan the day',
       category: 'email',
-      relatedItems: [],
     });
-    currentHour = this.advance(currentHour, 30);
+    currentMinute += 15;
 
-    // Block 2: Critical merchant requests (if any)
+    // Critical merchant requests first
     const criticalMerchant = merchantRequests.filter((t) => t.priority === 'critical' || t.priority === 'high');
     if (criticalMerchant.length > 0) {
+      const nextMeeting = this.nextMeetingAfter(sortedMeetings, currentMinute);
+      const available = nextMeeting ? nextMeeting - currentMinute : 60;
+      const duration = Math.min(available, 60);
+
       blocks.push({
-        start: this.fmt(currentHour, 0),
-        end: this.fmt(currentHour + 1, 0),
-        activity: `Handle ${criticalMerchant.length} urgent merchant request(s) — triage and assign to team`,
+        start: this.fmtMin(currentMinute),
+        end: this.fmtMin(currentMinute + duration),
+        activity: `Handle ${criticalMerchant.length} urgent merchant request(s) — triage and assign`,
         category: 'jira',
         relatedItems: criticalMerchant.map((t) => t.issue.key),
       });
-      currentHour += 1;
+      currentMinute += duration;
     }
 
-    // Block 3: Priority emails
-    const criticalEmails = priorityEmails.filter(
-      (e) => e.priority === 'critical' || e.priority === 'high'
-    );
-    if (criticalEmails.length > 0) {
-      blocks.push({
-        start: this.fmt(currentHour, 0),
-        end: this.fmt(currentHour, 45),
-        activity: `Respond to ${criticalEmails.length} high-priority email(s)`,
-        category: 'email',
-        relatedItems: criticalEmails.map((e) => e.email.id),
-      });
-      currentHour = this.advance(currentHour, 45);
+    // Interleave meetings with work blocks
+    for (const meeting of sortedMeetings) {
+      const meetingStart = this.toMinutes(meeting.start);
+      const meetingEnd = this.toMinutes(meeting.end);
+
+      // Fill gap before meeting with productive work
+      if (meetingStart > currentMinute + 15) {
+        const gapDuration = meetingStart - currentMinute;
+        blocks.push(this.fillGap(currentMinute, gapDuration, priorityEmails, openIssues, merchantRequests));
+      }
+
+      // Add the meeting
+      blocks.push(meeting);
+      currentMinute = meetingEnd;
     }
 
-    // Block 4: Deep focus work (Jira issues)
-    const myIssues = openIssues.filter((i) => i.status !== 'Done');
-    if (myIssues.length > 0) {
-      const focusEnd = Math.min(currentHour + 2, 12); // Focus until lunch or 2h max
-      blocks.push({
-        start: this.fmt(currentHour, 0),
-        end: this.fmt(focusEnd, 0),
-        activity: `Deep work — ${myIssues.length} open issue(s) to progress`,
-        category: 'focus',
-        relatedItems: myIssues.slice(0, 5).map((i) => i.key),
-      });
-      currentHour = focusEnd;
-    }
+    // Fill remaining time after last meeting
+    if (currentMinute < endMinute - 60) {
+      // Afternoon email check
+      const criticalEmails = priorityEmails.filter((e) => e.priority === 'critical' || e.priority === 'high');
+      if (criticalEmails.length > 0) {
+        blocks.push({
+          start: this.fmtMin(currentMinute),
+          end: this.fmtMin(currentMinute + 30),
+          activity: `Respond to ${criticalEmails.length} high-priority email(s)`,
+          category: 'email',
+          relatedItems: criticalEmails.slice(0, 5).map((e) => e.email.id),
+        });
+        currentMinute += 30;
+      }
 
-    // Lunch break
-    if (currentHour <= 12) {
-      blocks.push({
-        start: this.fmt(12, 0),
-        end: this.fmt(13, 0),
-        activity: 'Lunch break',
-        category: 'break',
-      });
-      currentHour = 13;
-    }
+      // Remaining Jira triage
+      const remainingTriage = merchantRequests.filter((t) => t.priority === 'medium' || t.priority === 'low');
+      if (remainingTriage.length > 0 && currentMinute < endMinute - 90) {
+        blocks.push({
+          start: this.fmtMin(currentMinute),
+          end: this.fmtMin(currentMinute + 30),
+          activity: `Triage ${remainingTriage.length} remaining ticket(s) and assign`,
+          category: 'jira',
+          relatedItems: remainingTriage.map((t) => t.issue.key),
+        });
+        currentMinute += 30;
+      }
 
-    // Afternoon: remaining emails
-    const mediumEmails = priorityEmails.filter((e) => e.priority === 'medium');
-    if (mediumEmails.length > 0) {
-      blocks.push({
-        start: this.fmt(currentHour, 0),
-        end: this.fmt(currentHour, 45),
-        activity: `Process ${mediumEmails.length} remaining email(s)`,
-        category: 'email',
-        relatedItems: mediumEmails.map((e) => e.email.id),
-      });
-      currentHour = this.advance(currentHour, 45);
-    }
+      // Focus block
+      const myIssues = openIssues.filter((i) => i.status !== 'Done');
+      if (myIssues.length > 0 && currentMinute < endMinute - 60) {
+        const focusEnd = Math.min(currentMinute + 120, endMinute - 30);
+        blocks.push({
+          start: this.fmtMin(currentMinute),
+          end: this.fmtMin(focusEnd),
+          activity: `Deep focus — ${myIssues.length} open issue(s) to progress`,
+          category: 'focus',
+          relatedItems: myIssues.slice(0, 5).map((i) => i.key),
+        });
+        currentMinute = focusEnd;
+      }
 
-    // Afternoon: remaining Jira triage
-    const remainingTriage = merchantRequests.filter(
-      (t) => t.priority === 'medium' || t.priority === 'low'
-    );
-    if (remainingTriage.length > 0) {
+      // Slack catch-up
       blocks.push({
-        start: this.fmt(currentHour, 0),
-        end: this.fmt(currentHour + 1, 0),
-        activity: `Triage ${remainingTriage.length} remaining ticket(s) and assign to team`,
-        category: 'jira',
-        relatedItems: remainingTriage.map((t) => t.issue.key),
+        start: this.fmtMin(currentMinute),
+        end: this.fmtMin(currentMinute + 15),
+        activity: 'Slack catch-up — respond to team messages and threads',
+        category: 'slack',
       });
-      currentHour += 1;
-    }
-
-    // Focus block in afternoon
-    if (currentHour < this.endHour - 1) {
-      blocks.push({
-        start: this.fmt(currentHour, 0),
-        end: this.fmt(this.endHour - 1, 0),
-        activity: 'Afternoon focus block — continue deep work on issues',
-        category: 'focus',
-      });
-      currentHour = this.endHour - 1;
+      currentMinute += 15;
     }
 
     // End of day wrap-up
     blocks.push({
-      start: this.fmt(this.endHour - 1, 0),
-      end: this.fmt(this.endHour, 0),
-      activity: 'End-of-day wrap-up — update ticket statuses, prep tomorrow',
+      start: this.fmtMin(endMinute - 30),
+      end: this.fmtMin(endMinute),
+      activity: 'End-of-day wrap-up — update tickets, prep tomorrow, post Slack summary',
       category: 'jira',
     });
 
     return blocks;
   }
 
-  private fmt(hour: number, minute: number): string {
-    return dayjs().hour(hour).minute(minute).format('HH:mm');
+  private fillGap(
+    startMin: number,
+    duration: number,
+    emails: EmailSummary[],
+    issues: JiraIssue[],
+    _triage: TriageResult[]
+  ): TimeBlock {
+    if (duration >= 90) {
+      return {
+        start: this.fmtMin(startMin),
+        end: this.fmtMin(startMin + duration),
+        activity: `Deep focus block — work on ${issues.length} open issue(s)`,
+        category: 'focus',
+        relatedItems: issues.slice(0, 3).map((i) => i.key),
+      };
+    }
+    if (duration >= 45) {
+      const mediumEmails = emails.filter((e) => e.priority === 'medium');
+      return {
+        start: this.fmtMin(startMin),
+        end: this.fmtMin(startMin + duration),
+        activity: mediumEmails.length > 0
+          ? `Process ${mediumEmails.length} email(s) and review Slack`
+          : 'Email + Slack catch-up',
+        category: 'email',
+      };
+    }
+    return {
+      start: this.fmtMin(startMin),
+      end: this.fmtMin(startMin + duration),
+      activity: 'Quick break / buffer time',
+      category: 'break',
+    };
   }
 
-  private advance(hour: number, minutes: number): number {
-    return hour + minutes / 60;
+  private nextMeetingAfter(meetings: TimeBlock[], afterMinute: number): number | null {
+    for (const m of meetings) {
+      const mStart = this.toMinutes(m.start);
+      if (mStart > afterMinute) return mStart;
+    }
+    return null;
+  }
+
+  private toMinutes(time: string): number {
+    const [h, m] = time.split(':').map(Number);
+    return h * 60 + m;
+  }
+
+  private fmtMin(totalMinutes: number): string {
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    return `${String(h).padStart(2, '0')}:${String(Math.round(m)).padStart(2, '0')}`;
   }
 
   formatBriefing(briefing: DailyBriefing): string {
@@ -164,26 +225,39 @@ export class SchedulerModule {
 
     lines.push('');
     lines.push(`  DAILY BRIEFING — ${dateStr}`);
-    lines.push('  ' + '='.repeat(50));
+    lines.push('  ' + '='.repeat(56));
     lines.push('');
 
     // Overview
     lines.push('  OVERVIEW');
-    lines.push(`    Unread emails: ${briefing.unreadEmailCount}`);
-    lines.push(`    Emails needing action: ${briefing.priorityEmails.length}`);
-    lines.push(`    Open Jira issues: ${briefing.openJiraIssues.length}`);
-    lines.push(`    Merchant requests to triage: ${briefing.merchantRequests.length}`);
+    lines.push(`    Unread emails:           ${briefing.unreadEmailCount}`);
+    lines.push(`    Emails needing action:   ${briefing.priorityEmails.length}`);
+    lines.push(`    Open Jira issues:        ${briefing.openJiraIssues.length}`);
+    lines.push(`    Meetings today:          ${briefing.todaysMeetings.length}`);
+    lines.push(`    Merchant requests:       ${briefing.merchantRequests.length}`);
     lines.push('');
+
+    // Meetings
+    if (briefing.todaysMeetings.length > 0) {
+      lines.push('  MEETINGS');
+      for (const m of briefing.todaysMeetings) {
+        const start = dayjs(m.start).format('HH:mm');
+        const end = dayjs(m.end).format('HH:mm');
+        const loc = m.isOnline ? '(online)' : m.location ? `@ ${m.location}` : '';
+        lines.push(`    ${start}–${end}  ${m.subject} ${loc}`);
+      }
+      lines.push('');
+    }
 
     // Priority emails
     if (briefing.priorityEmails.length > 0) {
       lines.push('  PRIORITY EMAILS');
       for (const es of briefing.priorityEmails.slice(0, 10)) {
-        const icon = es.priority === 'critical' ? '!!!' : es.priority === 'high' ? '!!' : '!';
+        const icon = es.priority === 'critical' ? '!!!' : es.priority === 'high' ? ' !!' : '  !';
         const tag = es.isMerchantRequest ? ' [MERCHANT]' : '';
         lines.push(`    [${icon}] ${es.email.subject}${tag}`);
-        lines.push(`        From: ${es.email.from}`);
-        lines.push(`        Action: ${es.suggestedAction}`);
+        lines.push(`          From: ${es.email.from}`);
+        lines.push(`          Action: ${es.suggestedAction}`);
       }
       lines.push('');
     }
@@ -193,8 +267,8 @@ export class SchedulerModule {
       lines.push('  MERCHANT REQUESTS TO ASSIGN');
       for (const tr of briefing.merchantRequests) {
         lines.push(`    ${tr.issue.key}: ${tr.issue.summary}`);
-        lines.push(`        Suggested assignee: ${tr.suggestedAssignee.name}`);
-        lines.push(`        Reason: ${tr.reason}`);
+        lines.push(`          Assign to: ${tr.suggestedAssignee.name}`);
+        lines.push(`          Reason: ${tr.reason}`);
       }
       lines.push('');
     }
@@ -203,12 +277,16 @@ export class SchedulerModule {
     lines.push('  SUGGESTED SCHEDULE');
     for (const block of briefing.suggestedSchedule) {
       const icon =
-        block.category === 'email' ? '[E]' :
-        block.category === 'jira' ? '[J]' :
-        block.category === 'focus' ? '[F]' :
+        block.category === 'email'   ? '[E]' :
+        block.category === 'jira'    ? '[J]' :
+        block.category === 'focus'   ? '[F]' :
         block.category === 'meeting' ? '[M]' :
+        block.category === 'slack'   ? '[S]' :
         '[~]';
       lines.push(`    ${block.start}–${block.end}  ${icon} ${block.activity}`);
+      if (block.relatedItems?.length) {
+        lines.push(`                     ${block.relatedItems.join(', ')}`);
+      }
     }
     lines.push('');
 

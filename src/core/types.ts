@@ -1,5 +1,6 @@
 // ===== ChrisVA Core Types =====
 
+// ─── Email (Outlook) ─────────────────────────────────
 export interface Email {
   id: string;
   from: string;
@@ -11,6 +12,9 @@ export interface Email {
   isRead: boolean;
   labels: string[];
   threadId: string;
+  importance: 'low' | 'normal' | 'high';
+  hasAttachments: boolean;
+  conversationId: string;
 }
 
 export interface EmailSummary {
@@ -25,6 +29,23 @@ export interface EmailSummary {
 export type Priority = 'critical' | 'high' | 'medium' | 'low';
 export type EmailCategory = 'merchant-request' | 'internal' | 'external' | 'automated' | 'newsletter';
 
+// ─── Calendar (Outlook) ──────────────────────────────
+export interface CalendarEvent {
+  id: string;
+  subject: string;
+  start: Date;
+  end: Date;
+  location: string;
+  isAllDay: boolean;
+  organizer: string;
+  attendees: string[];
+  isOnline: boolean;
+  onlineUrl: string;
+  status: 'free' | 'tentative' | 'busy' | 'oof' | 'unknown';
+  body: string;
+}
+
+// ─── Jira ────────────────────────────────────────────
 export interface JiraIssue {
   key: string;
   summary: string;
@@ -43,6 +64,7 @@ export interface JiraIssue {
 export interface TeamMember {
   name: string;
   jiraAccountId: string;
+  slackUserId?: string;
   skills?: string[];
   currentLoad?: number;
 }
@@ -55,12 +77,34 @@ export interface TriageResult {
   isMerchantRequest: boolean;
 }
 
+// ─── Slack ───────────────────────────────────────────
+export interface SlackMessage {
+  channel: string;
+  text: string;
+  blocks?: SlackBlock[];
+  threadTs?: string;
+}
+
+export interface SlackBlock {
+  type: 'section' | 'divider' | 'header' | 'context';
+  text?: { type: 'mrkdwn' | 'plain_text'; text: string };
+  fields?: Array<{ type: 'mrkdwn' | 'plain_text'; text: string }>;
+}
+
+export interface SlackChannelInfo {
+  id: string;
+  name: string;
+  purpose: string;
+}
+
+// ─── Daily Briefing ──────────────────────────────────
 export interface DailyBriefing {
   date: Date;
   unreadEmailCount: number;
   priorityEmails: EmailSummary[];
   openJiraIssues: JiraIssue[];
   merchantRequests: TriageResult[];
+  todaysMeetings: CalendarEvent[];
   suggestedSchedule: TimeBlock[];
 }
 
@@ -68,10 +112,11 @@ export interface TimeBlock {
   start: string; // HH:mm
   end: string;   // HH:mm
   activity: string;
-  category: 'email' | 'jira' | 'meeting' | 'focus' | 'break';
-  relatedItems?: string[]; // email IDs or Jira keys
+  category: 'email' | 'jira' | 'meeting' | 'focus' | 'break' | 'slack';
+  relatedItems?: string[];
 }
 
+// ─── Config ──────────────────────────────────────────
 export interface VAConfig {
   jira: {
     host: string;
@@ -79,8 +124,16 @@ export interface VAConfig {
     apiToken: string;
     projectKey: string;
   };
-  gmail: {
-    user: string;
+  outlook: {
+    clientId: string;
+    tenantId: string;
+    clientSecret: string;
+    userEmail: string;
+  };
+  slack: {
+    botToken: string;
+    defaultChannel: string;
+    triageChannel: string;
   };
   team: TeamMember[];
   schedule: {
@@ -95,6 +148,7 @@ export interface VAConfig {
   };
 }
 
+// ─── Plugin system ───────────────────────────────────
 export interface PluginContext {
   config: VAConfig;
   log: (message: string) => void;
