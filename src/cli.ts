@@ -13,6 +13,7 @@ import { EmailTriageModule } from './modules/email-triage';
 import { JiraTriageModule } from './modules/jira-triage';
 import { SchedulerModule } from './modules/scheduler';
 import { mockEmails, mockCalendarEvents, mockMyIssues, mockUnassignedIssues } from './demo/mock-data';
+import { runSetupWizard } from './setup/wizard';
 import { banner, header, subHeader, priorityBadge, categoryBadge, truncate } from './utils/display';
 import { VAConfig, TriageResult, Email, CalendarEvent, JiraIssue } from './core/types';
 import dayjs from 'dayjs';
@@ -24,6 +25,14 @@ program
   .description('ChrisVA — Your virtual assistant for Outlook, Jira, Slack, and workday management')
   .version('0.2.0')
   .option('--demo', 'Run in demo mode with simulated data (no credentials needed)');
+
+// ─── setup ───────────────────────────────────────────
+program
+  .command('setup')
+  .description('Interactive setup wizard — get all your API keys configured step by step')
+  .action(async () => {
+    await runSetupWizard();
+  });
 
 function isDemo(): boolean {
   return process.argv.includes('--demo');

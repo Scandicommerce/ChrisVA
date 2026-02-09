@@ -8,9 +8,16 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/cli.js",
+    "start": "node dist/cli.js briefing",
+    "setup": "node dist/cli.js setup",
+    "demo": "node dist/cli.js demo",
+    "briefing": "node dist/cli.js briefing",
+    "emails": "node dist/cli.js emails",
+    "calendar": "node dist/cli.js calendar",
+    "triage": "node dist/cli.js triage",
+    "schedule": "node dist/cli.js schedule",
+    "status": "node dist/cli.js status",
     "dev": "ts-node src/cli.ts",
-    "demo": "ts-node src/cli.ts demo",
     "lint": "eslint src/ --ext .ts",
     "test": "jest --passWithNoTests"
   },
