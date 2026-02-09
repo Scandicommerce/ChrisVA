@@ -29,19 +29,28 @@ export class JiraClient {
     return res.json();
   }
 
+  private get projectFilter(): string {
+    return this.config.projectKey ? `project = ${this.config.projectKey} AND ` : '';
+  }
+
   async getMyOpenIssues(): Promise<JiraIssue[]> {
-    const jql = `project = ${this.config.projectKey} AND assignee = currentUser() AND status != Done ORDER BY priority DESC, updated DESC`;
+    const jql = `${this.projectFilter}assignee = currentUser() AND status != Done ORDER BY priority DESC, updated DESC`;
     return this.searchIssues(jql);
   }
 
   async getUnassignedIssues(): Promise<JiraIssue[]> {
-    const jql = `project = ${this.config.projectKey} AND assignee is EMPTY AND status != Done ORDER BY created DESC`;
+    const jql = `${this.projectFilter}assignee is EMPTY AND status != Done ORDER BY created DESC`;
     return this.searchIssues(jql);
   }
 
   async getRecentIssues(hours = 24): Promise<JiraIssue[]> {
-    const jql = `project = ${this.config.projectKey} AND created >= -${hours}h ORDER BY created DESC`;
+    const jql = `${this.projectFilter}created >= -${hours}h ORDER BY created DESC`;
     return this.searchIssues(jql);
+  }
+
+  async getProjectKeys(): Promise<string[]> {
+    const data = (await this.request('/project')) as Array<{ key: string; name: string }>;
+    return data.map((p) => p.key);
   }
 
   async searchIssues(jql: string): Promise<JiraIssue[]> {

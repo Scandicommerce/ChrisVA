@@ -36,7 +36,7 @@ export function loadConfig(): VAConfig {
       host: required('JIRA_HOST'),
       email: required('JIRA_EMAIL'),
       apiToken: required('JIRA_API_TOKEN'),
-      projectKey: required('JIRA_PROJECT_KEY'),
+      projectKey: optional('JIRA_PROJECT_KEY', ''),
     },
     outlook: {
       clientId: required('OUTLOOK_CLIENT_ID'),
